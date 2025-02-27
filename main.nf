@@ -30,6 +30,9 @@ if (params.index_genome) {
 if (params.fastqc) {
     include { FASTQC } from './modules/FASTQC'
 }
+
+include { readTrimming } from './modules/readTrimming'
+
 include { sortBam } from './modules/sortBam'
 include { markDuplicates } from './modules/markDuplicates'
 include { indexBam } from './modules/indexBam'
@@ -50,13 +53,19 @@ if (params.aligner == 'bwa-mem') {
     include { alignReadsBwaMem } from './modules/alignReadsBwaMem'
 } else if (params.aligner == 'bwa-aln') {
     include { alignReadsBwaAln } from './modules/alignReadsBwaAln'
+} else if (params.aligner == 'bowtie2') {
+    include { alignReadsBowtie2 } from './modules/alignReadsBowtie2'
+} else if (params.aligner == 'minimap2') {
+    include { alignReadsMinimap2 } from './modules/alignReadsMinimap2'
 } else {
     error "Unsupported aligner: ${params.aligner}. Please specify 'bwa-mem' or 'bwa-aln'."
 }
 if (params.variant_caller == 'haplotype-caller') {
     include { haplotypeCaller } from './modules/haplotypeCaller'
+} else if (params.variant_caller == 'freebayes') {
+    include { freeBayes } from './modules/freeBayes'
 } else {
-    error "Unsupported variant caller: ${params.variant_caller}. Please specify 'haplotype-caller'."
+    error "Unsupported variant caller: ${params.variant_caller}. Please specify 'haplotype-caller', 'freebayes'."
 }
 
 if (params.degraded_dna) {
@@ -93,6 +102,13 @@ workflow {
         }
     read_pairs_ch.view()
 
+    // Conditionally trim reads
+    if (params.trim_reads) {
+        trimmed_reads_ch = readTrimming(read_pairs_ch)
+    } else {
+        trimmed_reads_ch = read_pairs_ch
+    }
+
     // Run FASTQC on read pairs
     if (params.fastqc) {
         FASTQC(read_pairs_ch)
@@ -103,6 +119,10 @@ workflow {
         align_ch = alignReadsBwaMem(read_pairs_ch, indexed_genome_ch.collect())
     } else if (params.aligner == 'bwa-aln') {
         align_ch = alignReadsBwaAln(read_pairs_ch, indexed_genome_ch.collect())
+    } else if (params.aligner == 'bowtie2') {
+    align_ch = alignReadsBowtie2(read_pairs_ch, indexed_genome_ch.collect())
+     } else if (params.aligner == 'minimap2') {
+    align_ch = alignReadsMinimap2(read_pairs_ch, indexed_genome_ch.collect())
     }
 
     // Sort BAM files
@@ -142,6 +162,8 @@ workflow {
     // Run HaplotypeCaller on BQSR files
     if (params.variant_caller == "haplotype-caller") {
         gvcf_ch = haplotypeCaller(bqsr_ch, indexed_genome_ch.collect()).collect()
+    } else if (params.variant_caller == "freebayes") {
+        gvcf_ch = freeBayes(bqsr_ch, indexed_genome_ch.collect()).collect()
     }
 
     // Now we map to create separate lists for sample IDs, VCF files, and index files
@@ -253,6 +275,75 @@ workflow FASTQC_only {
         FASTQC(read_pairs_ch)
     }
 }
+
+
+workflow trimming_only {
+
+    // Set channel to gather read_pairs
+    read_pairs_ch = Channel
+        .fromPath(params.samplesheet)
+        .splitCsv(sep: '\t')
+        .map { row ->
+            if (row.size() == 4) {
+                tuple(row[0], [row[1], row[2]])
+            } else if (row.size() == 3) {
+                tuple(row[0], [row[1]])
+            } else {
+                error "Unexpected row format in samplesheet: $row"
+            }
+        }
+    read_pairs_ch.view()
+
+    // Conditionally trim reads
+    if (params.trim_reads) {
+        trimmed_reads_ch = readTrimming(read_pairs_ch)
+    } else {
+        trimmed_reads_ch = read_pairs_ch
+    }
+
+    // Optionally run FASTQC on trimmed (or untrimmed) reads
+    if (params.fastqc) {
+        FASTQC(trimmed_reads_ch)
+    }
+
+}
+
+
+workflow alignment_only {
+
+    // Set channel to gather read_pairs
+    read_pairs_ch = Channel
+        .fromPath(params.samplesheet)
+        .splitCsv(sep: '\t')
+        .map { row ->
+            if (row.size() == 4) {
+                tuple(row[0], [row[1], row[2]])
+            } else if (row.size() == 3) {
+                tuple(row[0], [row[1]])
+            } else {
+                error "Unexpected row format in samplesheet: $row"
+            }
+        }
+    read_pairs_ch.view()
+
+    // Set up the genome index channel
+    indexed_genome_ch = Channel.fromPath(params.genome_index_files)
+
+    // Align reads based on the selected aligner
+    if (params.aligner == 'bwa-mem') {
+        align_ch = alignReadsBwaMem(read_pairs_ch, indexed_genome_ch)
+    } else if (params.aligner == 'bwa-aln') {
+        align_ch = alignReadsBwaAln(read_pairs_ch, indexed_genome_ch)
+    } else if (params.aligner == 'bowtie2') {
+        align_ch = alignReadsBowtie2(read_pairs_ch, indexed_genome_ch)
+    } else if (params.aligner == 'minimap2') {
+        align_ch = alignReadsMinimap2(read_pairs_ch, indexed_genome_ch)
+    } else {
+        error "Unsupported aligner: ${params.aligner}. Please specify 'bwa-mem', 'bwa-aln', or 'bowtie2', or 'minimap2."
+    }
+
+}
+   
 
 workflow.onComplete {
     log.info ( workflow.success ? "\nworkflow is done!\n" : "Oops .. something went wrong" )
